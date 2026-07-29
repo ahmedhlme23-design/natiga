@@ -28,6 +28,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+RESULTS_PER_PAGE = 8  # عدد الأسماء المنشورة في الصفحة الواحدة لتسهيل العرض
+
 # -------------------------------------------------------------
 # الدوال المساعدة للربط مع Supabase
 # -------------------------------------------------------------
@@ -41,15 +43,15 @@ def search_by_seating_no(seating_no: int):
     return None
 
 def search_by_name(name_query: str):
-    """البحث بواسطة الاسم (يحتوي على الكلمة)"""
-    url = f"{SUPABASE_URL}/rest/v1/student_results?arabic_name=ilike.*{name_query}*&select=*&limit=10"
+    """البحث بواسطة الاسم لجلب جميع النتائج المطابقة دون حد 10 نتائج"""
+    url = f"{SUPABASE_URL}/rest/v1/student_results?arabic_name=ilike.*{name_query}*&select=*"
     response = requests.get(url, headers=HEADERS)
     if response.status_code == 200:
         return response.json()
     return []
 
 def get_student_by_id(student_id: int):
-    """جلب بيانات طالب محدد بواسطة ID الخاص به"""
+    """جلب بيانات طالب محدد بواسطة ID"""
     url = f"{SUPABASE_URL}/rest/v1/student_results?id=eq.{student_id}&select=*"
     response = requests.get(url, headers=HEADERS)
     if response.status_code == 200:
@@ -77,11 +79,34 @@ def format_result_message(student: dict) -> str:
     )
     return msg
 
+def build_name_results_keyboard(results: list, page: int = 0):
+    """بناء الأزرار التفاعلية للنتائج مع إمكانية التنقل بين الصفحات"""
+    start_idx = page * RESULTS_PER_PAGE
+    end_idx = start_idx + RESULTS_PER_PAGE
+    page_results = results[start_idx:end_idx]
+
+    keyboard = []
+    for student in page_results:
+        btn_text = f"👤 {student['arabic_name']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_std_{student['id']}")])
+
+    # أزرار الانتقال بين الصفحات إذا كانت النتائج أكثر من المسموح بالصفحة
+    pagination_buttons = []
+    if page > 0:
+        pagination_buttons.append(InlineKeyboardButton("◀️ السابق", callback_data=f"page_{page - 1}"))
+    
+    if end_idx < len(results):
+        pagination_buttons.append(InlineKeyboardButton("التالي ▶️", callback_data=f"page_{page + 1}"))
+
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+
+    return InlineKeyboardMarkup(keyboard)
+
 # -------------------------------------------------------------
 # معالجة أوامر البوت والأحداث
 # -------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عند ضغط زر ابدأ أو كتابة /start"""
     user_name = update.effective_user.first_name
     welcome_text = (
         f"أهلاً بك يا {user_name} في بوت نتائج الثانوية العامة 2026! 🎓\n\n"
@@ -90,16 +115,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة كافة النصوص المدخلة من المستخدم"""
     text = update.message.text.strip()
 
-    # 1. التحقق إذا كان المدخل رقم جلوس (أرقام فقط)
+    # 1. البحث برقم الجلوس
     if text.isdigit():
         if len(text) != 7:
             await update.message.reply_text("⚠️ يجب أن يكون رقم الجلوس مكوناً من 7 أرقام بالضبط.")
             return
 
-        # البحث برقم الجلوس
         results = search_by_seating_no(int(text))
         if results:
             student = results[0]
@@ -112,7 +135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ هذه النتيجة غير موجودة حالياً في قاعدة البيانات أو أن رقم الجلوس خطأ. من فضلك أعد إدخال البيانات صحيحة."
             )
 
-    # 2. إذا كان المدخل اسماً
+    # 2. البحث بالاسم
     else:
         words = text.split()
         if len(words) < 2:
@@ -126,17 +149,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # إذا كانت هناك نتائج، يتم عرضها على هيئة أزرار
-        keyboard = []
-        for student in results:
-            btn_text = f"👤 {student['arabic_name']}"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_std_{student['id']}")])
+        # حفظ النتائج في جلسة المستخدم الحالية لدعم التنقل بين الصفحات
+        context.user_data['search_results'] = results
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("🔎 وجدنا النتائج التالية، اختر الاسم المطلوب لمشاهدة التفاصيل:", reply_markup=reply_markup)
+        reply_markup = build_name_results_keyboard(results, page=0)
+        total_count = len(results)
+        await update.message.reply_text(
+            f"🔎 تم العثور على ({total_count}) نتيجة مطابقة، اختر الاسم المطلوب لمشاهدة التفاصيل:",
+            reply_markup=reply_markup
+        )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة ضغطات الأزرار التفاعلية"""
     query = update.callback_query
     await query.answer()
 
@@ -144,6 +167,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "search_again":
         await query.message.reply_text("يرجى إرسال **اسم الطالب** (اسمين على الأقل) أو **رقم الجلوس** (7 أرقام):", parse_mode="Markdown")
+
+    elif data.startswith("page_"):
+        page = int(data.split("_")[1])
+        results = context.user_data.get('search_results', [])
+        
+        if results:
+            reply_markup = build_name_results_keyboard(results, page=page)
+            total_count = len(results)
+            await query.edit_message_text(
+                f"🔎 تم العثور على ({total_count}) نتيجة مطابقة، اختر الاسم المطلوب لمشاهدة التفاصيل (صفحة {page + 1}):",
+                reply_markup=reply_markup
+            )
 
     elif data.startswith("show_std_"):
         student_id = int(data.split("_")[-1])
